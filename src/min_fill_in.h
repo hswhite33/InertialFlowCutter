@@ -329,7 +329,7 @@ namespace cch_order{
 		assert(is_connected(tail, head));
 		int node_count = tail.image_count();
 		int arc_count = tail.preimage_count();
-		if (arc_count == 0) return {};
+		if (arc_count == 0) return;
 
 		std::deque<int> cut;
 		if (arc_count + 1 == node_count) {
@@ -411,17 +411,8 @@ namespace cch_order{
 			input_arc_id = chain(p, std::move(input_arc_id));
 		}
 
-		auto get_sub_order_begin = [&](int arc_begin, int arc_end) {
-			int sub_arc_count = arc_end - arc_begin;
-
-			int sub_order_begin = order_begin;
-			assert(order_begin + sub_arc_count <= order_end);
-			order_begin += sub_arc_count;
-			return sub_order_begin;
-		};
-
 		struct SubProblem {
-			int node_begin, node_end, arc_begin, arc_end, sub_order_begin;
+			int node_begin, node_end, arc_begin, arc_end;
 			int node_count() const { return node_end - node_begin; }
 			int arc_count() const { return arc_end - arc_begin; }
 		};
@@ -444,8 +435,7 @@ namespace cch_order{
 					while (arc_end < arc_count && tail(arc_end) < node_end) {
 						++arc_end;
 					}
-					int sub_order_begin = get_sub_order_begin(arc_begin, arc_end);
-					SubProblem sp = {node_begin, node_end, arc_begin, arc_end, sub_order_begin};
+					SubProblem sp = {node_begin, node_end, arc_begin, arc_end};
 					if (sp.node_count() > TASK_SPAWN_CUTOFF) {
 						big.push_back(sp);
 					} else {
@@ -456,8 +446,7 @@ namespace cch_order{
 				}
 			}
 
-			int sub_order_begin = get_sub_order_begin(arc_begin, arc_count);
-			SubProblem sp = {node_begin, node_count, arc_begin, arc_count, sub_order_begin};
+			SubProblem sp = {node_begin, node_count, arc_begin, arc_count};
 			if (sp.node_count() > TASK_SPAWN_CUTOFF) {
 				big.push_back(sp);
 			} else {
@@ -465,10 +454,9 @@ namespace cch_order{
 			}
 		}
 
-		auto on_new_component = [&](SubProblem sub_problem, HierarchyNode& sub_hchy_node){
+		auto on_new_component = [&](SubProblem sub_problem, HierarchyNode* sub_hchy_node){
 			int node_begin = sub_problem.node_begin; int node_end = sub_problem.node_end;
 			int arc_begin = sub_problem.arc_begin; int arc_end = sub_problem.arc_end;
-			int sub_order_begin = sub_problem.sub_order_begin;
 			auto sub_node_count = node_end - node_begin;
 			auto sub_arc_count = arc_end - arc_begin;
 
@@ -504,7 +492,7 @@ namespace cch_order{
 			);
 			assert(is_loop_free(sub_tail, sub_head));
 
-			compute_nested_dissection_expanded_graph_order(sub_tail, sub_head, sub_input_node_id, sub_input_arc_id, sub_arc_weight, compute_cut, sub_hchy_node);
+			compute_nested_dissection_expanded_graph_order(sub_tail, sub_head, sub_input_node_id, sub_input_arc_id, sub_arc_weight, compute_cut, *sub_hchy_node);
 		};
 
 		tbb::task_group tg;
@@ -517,11 +505,11 @@ namespace cch_order{
 
 		//std::sort(big.begin(), big.end(), [](const auto& a, const auto& b) { return a.node_count() > b.node_count(); });
 		for (size_t i{0}; i < big.size(); ++i) {
-			tg.run(std::bind(on_new_component, big[i], hchy_node.children[i]));
+			tg.run(std::bind(on_new_component, big[i], &hchy_node.children[i]));
 		}
 		tg.run_and_wait([&]() {
 			for (size_t i{0}; i < small.size(); ++i) {
-				on_new_component(small[i], hchy_node.children[i + big.size()]);
+				on_new_component(small[i], &hchy_node.children[i + big.size()]);
 			}
 		});
 	}
@@ -554,6 +542,8 @@ namespace cch_order{
 				frontier.push_back(&child);
 			}
 		}
+
+		return order;
 	}
 
 	template<class ComputeSeparator, class ComputePartOrder>
