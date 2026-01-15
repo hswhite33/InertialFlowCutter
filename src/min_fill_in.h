@@ -30,6 +30,10 @@
 namespace cch_order{
 	static constexpr int TASK_SPAWN_CUTOFF = 800;
 
+	struct HierarchyNode {
+		std::vector<HierarchyNode> children;
+		std::vector<int> cut;
+	};
 
 	inline
 	bool is_valid_partial_order(const ArrayIDIDFunc&partial_order){
@@ -82,11 +86,11 @@ namespace cch_order{
 
 	// Computes an optimal order for a trivial graph. If the input graph is not trivial, then the task is forwarded to the compute_non_trivial_graph_order functor parameter.
 	// A graph is trivial if it is a clique or a tree.
-	//	
+	//
 	// Precondition: the graph is connected
 	template<class ComputeNonTrivialGraphOrder>
 	ArrayIDIDFunc compute_trivial_graph_order_if_graph_is_trivial(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
 		ArrayIDFunc<int>arc_weight, const ComputeNonTrivialGraphOrder&compute_non_trivial_graph_order
 	){
@@ -95,7 +99,7 @@ namespace cch_order{
 
 		assert(is_connected(tail, head));
 
-		bool 
+		bool
 			is_clique = (static_cast<long long>(node_count)*static_cast<long long>(node_count-1) == static_cast<long long>(arc_count)),
 			has_no_arcs = (arc_count == 0),
 			is_tree = (arc_count == 2*(node_count-1));
@@ -123,7 +127,7 @@ namespace cch_order{
 	// compute_connected_graph_order should order the nodes in each component. The order should map node IDs in the graph that is given to input node IDs.
 	template<class ComputeConnectedGraphOrder, class ShouldPlaceNodeAtTheEndOfTheOrder>
 	ArrayIDIDFunc reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
 		ArrayIDFunc<int> arc_weight,
 		const ComputeConnectedGraphOrder&compute_connected_graph_order,
@@ -164,7 +168,7 @@ namespace cch_order{
 		ArrayIDIDFunc order(node_count, input_node_id.image_count());
 		int order_begin = 0;
 		int order_end = node_count;
-		
+
 		auto get_sub_order_begin = [&](int node_begin, int node_end) {
 			int sub_node_count = node_end - node_begin;
 #ifndef NDEBUG
@@ -314,12 +318,13 @@ namespace cch_order{
 	}
 
 	template<class ComputeCut>
-	ArrayIDIDFunc compute_nested_dissection_expanded_graph_order(
+	void compute_nested_dissection_expanded_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
 		ArrayIDIDFunc input_arc_id,
-		ArrayIDFunc<int> arc_weight, 
-		const ComputeCut& compute_cut
+		ArrayIDFunc<int> arc_weight,
+		const ComputeCut& compute_cut,
+		HierarchyNode& hchy_node
 	){
 		assert(is_connected(tail, head));
 		int node_count = tail.image_count();
@@ -372,15 +377,12 @@ namespace cch_order{
 		}
 		assert(cut.size() > 0);
 
-		ArrayIDIDFunc order(arc_count, input_arc_id.image_count());
-		int order_begin = 0;
-		int order_end = arc_count;
+		hchy_node.cut.reserve(cut.size());
 
 		BitIDFunc keep_arc_flag(arc_count);
 		keep_arc_flag.fill(true);
 		for(auto x : cut) {
-			order[order_begin] = input_arc_id(x);
-			order_begin++;
+			hchy_node.cut.push_back(input_arc_id(x));
 			keep_arc_flag.set(x, false);
 		}
 
@@ -463,8 +465,7 @@ namespace cch_order{
 			}
 		}
 
-		//auto on_new_component = [&tail, &head, &input_node_id, &arc_weight, &order, &compute_connected_graph_order](SubProblem& sub_problem){
-		auto on_new_component = [&](SubProblem sub_problem){
+		auto on_new_component = [&](SubProblem sub_problem, HierarchyNode& sub_hchy_node){
 			int node_begin = sub_problem.node_begin; int node_end = sub_problem.node_end;
 			int arc_begin = sub_problem.arc_begin; int arc_end = sub_problem.arc_end;
 			int sub_order_begin = sub_problem.sub_order_begin;
@@ -503,10 +504,7 @@ namespace cch_order{
 			);
 			assert(is_loop_free(sub_tail, sub_head));
 
-			auto sub_order = compute_nested_dissection_expanded_graph_order(sub_tail, sub_head, sub_input_node_id, sub_input_arc_id, sub_arc_weight, compute_cut);
-			for (int i = 0; i < sub_arc_count; ++i) {
-				order[sub_order_begin + i] = sub_order(i);
-			}
+			compute_nested_dissection_expanded_graph_order(sub_tail, sub_head, sub_input_node_id, sub_input_arc_id, sub_arc_weight, compute_cut, sub_hchy_node);
 		};
 
 		tbb::task_group tg;
@@ -514,36 +512,55 @@ namespace cch_order{
 			small.push_back(big.front());
 			big.clear();
 		}
+
+		hchy_node.children.resize(big.size() + small.size());
+
 		//std::sort(big.begin(), big.end(), [](const auto& a, const auto& b) { return a.node_count() > b.node_count(); });
-		for (const SubProblem sp : big) {
-			tg.run(std::bind(on_new_component, sp));
+		for (size_t i{0}; i < big.size(); ++i) {
+			tg.run(std::bind(on_new_component, big[i], hchy_node.children[i]));
 		}
 		tg.run_and_wait([&]() {
-			std::for_each(small.begin(), small.end(), on_new_component);
+			for (size_t i{0}; i < small.size(); ++i) {
+				on_new_component(small[i], hchy_node.children[i + big.size()]);
+			}
 		});
-		assert(order_begin == order_end);
-		assert(is_valid_partial_order(order));
-		return order; // NVRO*/
 	}
 
 	template<class ComputeCut>
 	ArrayIDIDFunc compute_nested_dissection_expanded_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeCut& compute_cut
 	){
 		const int node_count = tail.image_count();
 		const int arc_count = tail.preimage_count();
 		auto input_node_id = identity_permutation(node_count);
 		auto input_arc_id = identity_permutation(arc_count);
-		return compute_nested_dissection_expanded_graph_order(tail, head, input_node_id, input_arc_id, arc_weight, compute_cut);
+
+		HierarchyNode root;
+		compute_nested_dissection_expanded_graph_order(tail, head, input_node_id, input_arc_id, arc_weight, compute_cut, root);
+
+		ArrayIDIDFunc order(arc_count, arc_count);
+		std::deque<const HierarchyNode*> frontier{&root};
+		int curr{0};
+
+		for (; !frontier.empty(); frontier.pop_front()) {
+			auto node = frontier.front();
+			for (auto x : node->cut) {
+				order[curr++] = x;
+			}
+
+			for (const auto& child : node->children) {
+				frontier.push_back(&child);
+			}
+		}
 	}
 
 	template<class ComputeSeparator, class ComputePartOrder>
 	ArrayIDIDFunc compute_nested_dissection_graph_order(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeSeparator&compute_separator,
 		const ComputePartOrder&compute_graph_part_order
 	){
@@ -558,12 +575,12 @@ namespace cch_order{
 			in_separator.set(x, true);
 
 		BitIDFunc keep_arc_flag = id_func(
-			arc_count, 
+			arc_count,
 			[&](int a){
 				return in_separator(tail(a)) == in_separator(head(a));
 			}
 		);
-		
+
 		if((int)separator.size() == node_count){
 			keep_arc_flag.fill(false);
 		}
@@ -577,26 +594,26 @@ namespace cch_order{
 		assert(is_symmetric(tail, head));
 
 		return reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			std::move(tail), std::move(head), 
-			std::move(input_node_id), std::move(arc_weight), 
+			std::move(tail), std::move(head),
+			std::move(input_node_id), std::move(arc_weight),
 			compute_graph_part_order, std::move(in_separator)
 		);
 	}
 
 	template<class ComputeSeparator>
 	ArrayIDIDFunc compute_nested_dissection_graph_order(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeSeparator&compute_separator
 	){
 		auto compute_graph_part_order = [&](
-			ArrayIDIDFunc a_tail, ArrayIDIDFunc a_head, 
+			ArrayIDIDFunc a_tail, ArrayIDIDFunc a_head,
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int>a_arc_weight
 		){
 			return compute_nested_dissection_graph_order(
-				std::move(a_tail), std::move(a_head), 
-				std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head),
+				std::move(a_input_node_id), std::move(a_arc_weight),
 				compute_separator
 			);
 		};
@@ -614,10 +631,10 @@ namespace cch_order{
 
 		BitIDFunc in_independent_set(node_count);
 		in_independent_set.fill(false);
-		
+
 		auto inv_tail = invert_sorted_id_id_func(tail);
 		auto degree = id_func(
-			node_count, 
+			node_count,
 			[&](int x){
 				return inv_tail(x).end() - inv_tail(x).begin();
 			}
@@ -643,7 +660,7 @@ namespace cch_order{
 		for(auto c=0; c<node_count; ++c){
 			if(in_independent_set(c)){
 				auto iter = inv_tail(c).begin();
-				auto 
+				auto
 					cx = *iter++,
 					cy = *iter++,
 					cz = *iter++;
@@ -674,7 +691,7 @@ namespace cch_order{
 		// Remove multi arcs
 		{
 			auto keep_flag = identify_non_multi_arcs(tail, head);
-			
+
 			arc_count = count_true(keep_flag);
 			tail = keep_if(keep_flag, arc_count, std::move(tail));
 			head = keep_if(keep_flag, arc_count, std::move(head));
@@ -684,7 +701,7 @@ namespace cch_order{
 		assert(is_symmetric(tail, head));
 
 		return reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			std::move(tail), std::move(head), 
+			std::move(tail), std::move(head),
 			std::move(input_node_id), std::move(arc_weight),
 			compute_core_graph_order, ~std::move(in_independent_set)
 		);
@@ -710,7 +727,7 @@ namespace cch_order{
 		//auto degree = compute_histogram(tail);
 
 		assert(is_symmetric(tail, head));
-		assert(!has_multi_arcs(tail, head)); 
+		assert(!has_multi_arcs(tail, head));
 		assert(is_loop_free(tail, head));
 
 
@@ -719,21 +736,21 @@ namespace cch_order{
 
 		auto inv_tail = invert_sorted_id_id_func(tail);
 		auto degree = id_func(
-			node_count, 
+			node_count,
 			[&](int x){
 				return inv_tail(x).end() - inv_tail(x).begin();
 			}
 		);
 
 		BitIDFunc node_in_core = id_func(
-			node_count, 
+			node_count,
 			[&](int x){
 				return degree(x) > 2;
 			}
 		);
 
 		for(auto first_arc=0; first_arc<arc_count; ++first_arc){
-			auto 
+			auto
 				chain_begin = tail(first_arc),
 				chain_now = head(first_arc);
 
@@ -748,7 +765,7 @@ namespace cch_order{
 						auto chain_next = head(arc_now_to_next);
 						if(chain_next != chain_prev){
 							chain_weight += arc_weight(arc_now_to_next);
-						
+
 							chain_prev = chain_now;
 							chain_now = chain_next;
 							arc_prev_to_now = arc_now_to_next;
@@ -761,7 +778,7 @@ namespace cch_order{
 
 				auto chain_end = chain_now;
 				auto last_arc = arc_prev_to_now;
-				
+
 				assert(degree(chain_end) != 0);
 
 				if(degree(chain_end) == 1){
@@ -830,7 +847,7 @@ namespace cch_order{
 					}
 
 				}
-		
+
 				assert(uf.component_count() == not_in_core_count+1);
 			}
 		}
@@ -839,14 +856,14 @@ namespace cch_order{
 
 		#ifdef NDEBUG
 		return reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			std::move(tail), std::move(head), 
+			std::move(tail), std::move(head),
 			std::move(input_node_id), std::move(arc_weight),
 			compute_core_graph_order, node_in_core
 		);
 		#else
 
 		auto order = reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			tail, head, 
+			tail, head,
 			input_node_id, arc_weight,
 			compute_core_graph_order, node_in_core
 		);
@@ -859,7 +876,7 @@ namespace cch_order{
 			for(auto&x:local_order)
 				x = super_to_sub[x];
 			for(int p=1; p<node_count; ++p){
-				auto x = local_order(p-1), y = local_order(p); 
+				auto x = local_order(p-1), y = local_order(p);
 				assert(
 					   (!node_in_core(x) && !node_in_core(y))
 					|| ( node_in_core(x) &&  node_in_core(y))
@@ -870,12 +887,12 @@ namespace cch_order{
 		return order;
 		#endif
 
-	
+
 	}
 
 	template<class ComputeConnectedGraphOrder>
 	ArrayIDIDFunc compute_graph_order_with_largest_biconnected_component_at_the_end(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id, ArrayIDFunc<int>arc_weight,
 		const ComputeConnectedGraphOrder&compute_component_graph_order
 	){
@@ -886,7 +903,7 @@ namespace cch_order{
 		// Large in terms of many arcs.
 
 		BitIDFunc node_in_largest_biconnected_component(node_count);
-		
+
 		{
 			auto out_arc = invert_sorted_id_id_func(tail);
 			auto back_arc = compute_back_arc_permutation(tail, head);
@@ -907,7 +924,7 @@ namespace cch_order{
 
 		{
 			BitIDFunc keep_flag = id_func(
-				arc_count, 
+				arc_count,
 				[&](int a){
 					return node_in_largest_biconnected_component(tail(a)) == node_in_largest_biconnected_component(head(a));
 				}
@@ -919,7 +936,7 @@ namespace cch_order{
 			arc_weight = keep_if(keep_flag, arc_count, std::move(arc_weight));
 		}
 		return reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			std::move(tail), std::move(head), 
+			std::move(tail), std::move(head),
 			std::move(input_node_id), std::move(arc_weight),
 			compute_component_graph_order, std::move(node_in_largest_biconnected_component)
 		);
@@ -944,7 +961,7 @@ namespace cch_order{
 			head = chain(p, std::move(head));
 			arc_weight = chain(p, std::move(arc_weight));
 		}
-		
+
 		// Remove multi-arcs and loops (requires sorted arcs)
 		{
 			BitIDFunc keep_flag = id_func(
@@ -974,7 +991,7 @@ namespace cch_order{
 	template<class ComputeSeparator>
 	ArrayIDIDFunc compute_nested_dissection_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeSeparator&compute_separator
 	){
 		const int node_count = tail.image_count();
@@ -988,13 +1005,13 @@ namespace cch_order{
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
 		){
 			return compute_nested_dissection_graph_order(
-				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight),
 				compute_separator
 			);
 		};
 
 		auto order = reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			std::move(tail), std::move(head), std::move(input_node_id), std::move(arc_weight), 
+			std::move(tail), std::move(head), std::move(input_node_id), std::move(arc_weight),
 			compute_order, [](int){return false;}
 		);
 
@@ -1007,7 +1024,7 @@ namespace cch_order{
 	ArrayIDIDFunc compute_cch_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDIDFunc input_node_id,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeSeparator&compute_separator
 	){
 
@@ -1018,7 +1035,7 @@ namespace cch_order{
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
 		){
 			return compute_nested_dissection_graph_order(
-				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight),
 				compute_separator
 			);
 		};
@@ -1028,7 +1045,7 @@ namespace cch_order{
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
 		){
 			return compute_graph_order_with_large_degree_three_independent_set_at_the_begin(
-				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight),
 				orderer4
 			);
 		};*/
@@ -1039,7 +1056,7 @@ namespace cch_order{
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
 		){
 			return compute_graph_order_with_degree_two_chain_at_the_begin(
-				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight),
 				orderer4
 			);
 		};
@@ -1049,13 +1066,13 @@ namespace cch_order{
 			ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
 		){
 			return compute_graph_order_with_largest_biconnected_component_at_the_end(
-				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight), 
+				std::move(a_tail), std::move(a_head), std::move(a_input_node_id), std::move(a_arc_weight),
 				orderer2
 			);
 		};
 
 		auto order = reorder_nodes_in_preorder_and_compute_unconnected_graph_order_if_component_is_non_trivial(
-			tail, head, input_node_id, arc_weight, 
+			tail, head, input_node_id, arc_weight,
 			orderer1, [](int){return false;}
 		);
 
@@ -1067,7 +1084,7 @@ namespace cch_order{
 	template<class ComputeSeparator>
 	ArrayIDIDFunc compute_cch_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
-		ArrayIDFunc<int> arc_weight, 
+		ArrayIDFunc<int> arc_weight,
 		const ComputeSeparator&compute_separator
 	){
 		return compute_cch_graph_order(std::move(tail), std::move(head), identity_permutation(tail.image_count()), std::move(arc_weight), compute_separator);
@@ -1087,7 +1104,7 @@ namespace cch_order{
 
 	template<class ComputeSeparator>
 	ArrayIDIDFunc compute_cch_graph_order_given_top_level_separator(
-		ArrayIDIDFunc tail, ArrayIDIDFunc head, 
+		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDFunc<int> arc_weight, std::vector<int>top_level_separator,
 		const ComputeSeparator&compute_separator
 	){
@@ -1098,8 +1115,8 @@ namespace cch_order{
 		auto input_node_id = identity_permutation(node_count);
 
 		return compute_nested_dissection_graph_order(
-			tail, head, input_node_id, arc_weight, 
-			ComputeConstantSeparator(std::move(top_level_separator)), 
+			tail, head, input_node_id, arc_weight,
+			ComputeConstantSeparator(std::move(top_level_separator)),
 			[&](
 				ArrayIDIDFunc a_tail, ArrayIDIDFunc a_head,
 				ArrayIDIDFunc a_input_node_id, ArrayIDFunc<int> a_arc_weight
