@@ -2,6 +2,7 @@
 #define CHAIN_H
 
 #include <type_traits>
+#include <vector>
 #include "id_func.h"
 #include "array_id_func.h"
 
@@ -50,5 +51,11 @@ chain(const L&l, const R&r){
 	return result; // NVRO
 }
 
-#endif
+template<typename P>
+void chain(std::vector<int>& l, const P& r) {
+	for (int i{0}; i < l.size(); ++i) {
+		l[i] = r(l[i]);
+	}
+}
 
+#endif

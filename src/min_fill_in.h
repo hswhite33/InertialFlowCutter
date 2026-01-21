@@ -515,7 +515,7 @@ namespace cch_order{
 	}
 
 	template<class ComputeCut>
-	ArrayIDIDFunc compute_nested_dissection_expanded_graph_order(
+	HierarchyNode compute_nested_dissection_expanded_graph_order(
 		ArrayIDIDFunc tail, ArrayIDIDFunc head,
 		ArrayIDFunc<int> arc_weight,
 		const ComputeCut& compute_cut
@@ -528,22 +528,7 @@ namespace cch_order{
 		HierarchyNode root;
 		compute_nested_dissection_expanded_graph_order(tail, head, input_node_id, input_arc_id, arc_weight, compute_cut, root);
 
-		ArrayIDIDFunc order(arc_count, arc_count);
-		std::deque<const HierarchyNode*> frontier{&root};
-		int curr{0};
-
-		for (; !frontier.empty(); frontier.pop_front()) {
-			auto node = frontier.front();
-			for (auto x : node->cut) {
-				order[curr++] = x;
-			}
-
-			for (const auto& child : node->children) {
-				frontier.push_back(&child);
-			}
-		}
-
-		return order;
+		return root;
 	}
 
 	template<class ComputeSeparator, class ComputePartOrder>

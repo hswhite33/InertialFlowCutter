@@ -43,6 +43,11 @@
 
 using namespace std;
 
+struct HierarchySubtree {
+	unsigned order_begin;
+	unsigned order_end;
+};
+
 ArrayIDIDFunc tail, head;
 ArrayIDFunc<int>node_weight, arc_weight;
 
@@ -51,6 +56,9 @@ ArrayIDFunc<GeoPos> node_geo_pos;
 
 ArrayIDIDFunc node_original_position;
 ArrayIDIDFunc arc_original_position;
+
+std::vector<HierarchySubtree> subtrees;
+std::vector<unsigned> link_subtree;
 
 void check_graph_consitency(){
 	#ifndef NDEBUG
@@ -173,6 +181,39 @@ struct Command{
 #include "fancy_input.h"
 
 auto w = setw(30);
+
+void process_hchy_node(
+	const cch_order::HierarchyNode& node,
+	const ArrayIDIDFunc& perm,
+	int& order_current,
+	ArrayIDIDFunc& order)
+{
+	const auto num_links = order.preimage_count();
+
+	const auto ord_start = static_cast<unsigned>(order_current);
+
+	for (const auto& child : node.children) {
+		process_hchy_node(child, perm, order_current, order);
+	}
+
+	const auto subtree_idx = static_cast<unsigned>(subtrees.size());
+
+	for (const auto& cut_link : node.cut) {
+		// cut_link is an index into new_tail, AFTER it has been permuted
+		auto pre_perm_link = perm[cut_link];
+		if (pre_perm_link >= num_links) {
+			// one of the temp links added to ensure bidirectionality
+			continue;
+		}
+
+		order[order_current++] = pre_perm_link;
+		link_subtree.push_back(subtree_idx);
+	}
+
+	if (order_current != ord_start) {
+		subtrees.push_back(HierarchySubtree{ord_start, static_cast<unsigned>(order_current)});
+	}
+}
 
 vector<Command>cmd = {
 	{
@@ -1866,7 +1907,7 @@ vector<Command>cmd = {
 			cout << flow_cutter_config.get_config() << flush;
 		}
 	},
-	
+
     {
         "flow_cutter_accelerated_enum_cuts", 1,
         "Enumerates balanced cuts.",
@@ -2270,7 +2311,7 @@ vector<Command>cmd = {
 	}
 },
 
-	
+
 {
 	"load_node_color_partition", 1,
 	"Loads a partition file into the node colors",
@@ -2962,7 +3003,10 @@ vector<Command>cmd = {
 		std::vector<unsigned>order(tail.preimage_count());
 		for(unsigned i=0; i<order.size(); ++i)
 			order[i] = arc_original_position[i];
-		save_vector(args[0], order);
+		save_vector(args[0] + "/IfcPermutation.dat", order);
+
+		save_vector(args[0] + "/IfcSubtrees.dat", subtrees);
+		save_vector(args[0] + "/IfcLinkSubtree.dat", link_subtree);
 	}
 },
 
@@ -3019,32 +3063,28 @@ vector<Command>cmd = {
 		new_head = chain(perm, move(new_head));
 		new_arc_weight = chain(perm, move(new_arc_weight));
 
-		ArrayIDIDFunc order;
+		cch_order::HierarchyNode root;
 
 		//omp_set_nested(true);
 		//#pragma omp parallel num_threads(flow_cutter_config.thread_count)
 		//#pragma omp single nowait
 		{
 			tbb::global_control gc(tbb::global_control::max_allowed_parallelism, flow_cutter_config.thread_count);
-			order = cch_order::compute_nested_dissection_expanded_graph_order(
+			root = cch_order::compute_nested_dissection_expanded_graph_order(
 				new_tail, new_head, new_arc_weight,
 				flow_cutter::ComputeCut<flow_cutter_accelerated::CutterFactory, ArrayIDFunc<GeoPos>>(node_geo_pos, flow_cutter_config, reorder_arcs)
 			);
 		}
-		order = chain(order, perm);
 
-		auto is_original = id_func(
-			order.preimage_count(),
-			[&](int i){
-				return order(i) >= 0 && order(i) < tail.preimage_count();
-			}
-		);
-		
-		ArrayIDIDFunc original_order = keep_if(is_original, tail.preimage_count(), order);
-		original_order.set_image_count(tail.preimage_count());
+		const auto num_links = tail.preimage_count();
+		ArrayIDIDFunc original_order(num_links, num_links);
+		link_subtree.reserve(static_cast<size_t>(num_links));
+		int order_current{0};
+
+		process_hchy_node(root, perm, order_current, original_order);
+
+		assert(order_current == num_links);
 		assert(is_permutation(original_order));
-
-		std::reverse(original_order.begin(), original_order.end());
 
 		permutate_arcs(original_order);
 	}
